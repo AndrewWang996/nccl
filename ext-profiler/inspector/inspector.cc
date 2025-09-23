@@ -745,12 +745,15 @@ struct inspectorDumpThread {
   bool run{false};
   jsonFileOutput* jfo;
   char* outputRoot;
+  char* logFilename;  // Store the full log filename for re-opening
   uint64_t sampleIntervalUsecs;
+  uint64_t lastFileCheckTime;  // Track when we last checked if file exists
   pthread_t pthread;
   pthread_rwlock_t guard;
 
   inspectorDumpThread(const char* outputRoot, uint64_t sampleIntervalUsecs)
-    : jfo(nullptr), outputRoot(strdup(outputRoot)), sampleIntervalUsecs(sampleIntervalUsecs) {
+    : jfo(nullptr), outputRoot(strdup(outputRoot)), logFilename(nullptr),
+      sampleIntervalUsecs(sampleIntervalUsecs), lastFileCheckTime(0) {
     if (inspectorLockInit(&guard) != inspectorSuccess) {
       INFO(NCCL_INSPECTOR, "NCCL Inspector inspectorDumpThread: couldn't init lock");
     }
@@ -764,6 +767,10 @@ struct inspectorDumpThread {
     if (outputRoot != nullptr) {
       free(outputRoot);
       outputRoot = nullptr;
+    }
+    if (logFilename != nullptr) {
+      free(logFilename);
+      logFilename = nullptr;
     }
     if (inspectorLockDestroy(&guard) != inspectorSuccess) {
       INFO(NCCL_INSPECTOR, "NCCL Inspector inspectorDumpThread: couldn't destroy lock");
@@ -803,17 +810,43 @@ struct inspectorDumpThread {
       return inspectorDisabledError;
     }
 
-    if (jfo == 0) {
+    // Generate filename if not already done
+    if (logFilename == nullptr) {
       char hostname[256];
       gethostname(hostname, 255);
       char tmp[2048];
       snprintf(tmp, sizeof(tmp), "%s/%s-pid%d.log", output_root, hostname, getpid());
-      jsonResult_t result = jsonInitFileOutput(&jfo, tmp);
+      logFilename = strdup(tmp);
+    }
+
+    // Check if we need to verify file existence (every 500ms)
+    uint64_t currentTime = inspectorGetTime();
+    bool needsFileCheck = (currentTime - lastFileCheckTime) > 500000; // 500ms in microseconds
+
+    if (needsFileCheck) {
+      lastFileCheckTime = currentTime;
+
+      // Check if file still exists
+      struct stat fileStat;
+      bool fileExists = (stat(logFilename, &fileStat) == 0);
+
+      if (jfo != nullptr && !fileExists) {
+        // File was deleted, close the old handle
+        INFO(NCCL_INSPECTOR, "Log file %s was removed, reopening", logFilename);
+        jsonFinalizeFileOutput(jfo);
+        jfo = nullptr;
+      }
+    }
+
+    // Open file if needed
+    if (jfo == nullptr) {
+      jsonResult_t result = jsonInitFileOutput(&jfo, logFilename);
       if (jsonSuccess != result) {
-        INFO(NCCL_INSPECTOR, "Cannot open %s for writing: %s", tmp, jsonErrorString(result));
+        INFO(NCCL_INSPECTOR, "Cannot open %s for writing: %s", logFilename, jsonErrorString(result));
         return inspectorFileOpenError;
       }
-      chmod(tmp, 0666);
+      chmod(logFilename, 0666);
+      INFO(NCCL_INSPECTOR, "Opened log file %s", logFilename);
     }
 
     if (jfo != nullptr) {
