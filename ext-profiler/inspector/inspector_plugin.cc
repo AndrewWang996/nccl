@@ -87,6 +87,7 @@ __hidden ncclResult_t inspectorPluginInit(void** context, uint64_t commHash,
                                           int* eActivationMask,
                                           const char* commName,
                                           int nNodes, int nranks, int rank,
+                                          int localRank, int localRanks,
                                           ncclDebugLogger_t logfn) {
   inspectorResult_t res = inspectorSuccess;
   *context = nullptr;
@@ -107,10 +108,11 @@ __hidden ncclResult_t inspectorPluginInit(void** context, uint64_t commHash,
 
   INS_CHK_GOTO(inspectorAddComm((struct inspectorCommInfo **)context,
                                 commName, commHash,
-                                nNodes, nranks, rank), res, success);
+                                nNodes, nranks, rank,
+                                localRank, localRanks), res, success);
   *eActivationMask = ncclProfileColl | ncclProfileKernelCh;
-  INFO(NCCL_INIT, "PROFILER/Plugin: init commName: %s commHash: %lu nranks: %d rank: %d",
-       commName ? commName : "", commHash, nranks, rank);
+  INFO(NCCL_INIT, "PROFILER/Plugin: init commName: %s commHash: %lu nranks: %d rank: %d localRank: %d localRanks: %d",
+       commName ? commName : "", commHash, nranks, rank, localRank, localRanks);
 success:
   if (res != inspectorSuccess) {
     return ncclInternalError;

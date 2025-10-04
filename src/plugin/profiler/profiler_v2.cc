@@ -93,6 +93,8 @@ static ncclResult_t ncclProfiler_init(void** context,
     int nNodes __attribute__((unused)),
     int nranks __attribute__((unused)),
     int rank __attribute__((unused)),
+    int localRank __attribute__((unused)),
+    int localRanks __attribute__((unused)),
     ncclDebugLogger_t logfn __attribute__((unused))
   ) {
   NCCLCHECK(ncclProfiler_v2->init(context, eActivationMask));

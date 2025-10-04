@@ -110,6 +110,8 @@ struct inspectorCommInfo {
   int rank;
   int nranks;
   int nnodes;
+  int localRank;
+  int localRanks;
 
   bool dump;
   struct inspectorCompletedCollInfo completedCollInfo;
@@ -186,7 +188,8 @@ inspectorResult_t inspectorGlobalFinalize();
 uint64_t inspectorGetTime();
 inspectorResult_t inspectorAddComm(struct inspectorCommInfo **commInfo,
                                    const char* commName, uint64_t commHash,
-                                   int nNodes, int nranks, int rank);
+                                   int nNodes, int nranks, int rank,
+                                   int localRank, int localRanks);
 inspectorResult_t inspectorDelComm(struct inspectorCommInfo *commInfo);
 
 void inspectorUpdateCollPerf(struct inspectorCompletedCollInfo *completedColl,

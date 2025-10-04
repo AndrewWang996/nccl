@@ -339,6 +339,8 @@ static inspectorResult_t inspectorCommInfoHeader(jsonFileOutput* jfo,
   JSON_CHK(jsonKey(jfo, "rank")); JSON_CHK(jsonInt(jfo, commInfo->rank));
   JSON_CHK(jsonKey(jfo, "n_ranks")); JSON_CHK(jsonInt(jfo, commInfo->nranks));
   JSON_CHK(jsonKey(jfo, "nnodes")); JSON_CHK(jsonUint64(jfo, commInfo->nnodes));
+  JSON_CHK(jsonKey(jfo, "local_rank")); JSON_CHK(jsonInt(jfo, commInfo->localRank));
+  JSON_CHK(jsonKey(jfo, "local_ranks")); JSON_CHK(jsonInt(jfo, commInfo->localRanks));
   JSON_CHK(jsonFinishObject(jfo));
   return inspectorSuccess;
 }
@@ -1181,13 +1183,16 @@ static bool comm_eq(uint64_t lCommHash, uint64_t rCommHash,
  */
 static inspectorResult_t inspectorFillCommInfo(struct inspectorCommInfo* commInfo,
                                                const char* commName, uint64_t commHash,
-                                               int nnodes, int nranks, int rank) {
+                                               int nnodes, int nranks, int rank,
+                                               int localRank, int localRanks) {
   commInfo->commName = commName;
   commInfo->commHash = commHash;
   inspectorCommGetHashStr(commHash, commInfo->commHashStr);
   commInfo->rank = rank;
   commInfo->nranks = nranks;
   commInfo->nnodes = nnodes;
+  commInfo->localRank = localRank;
+  commInfo->localRanks = localRanks;
   commInfo->dump = false;
   INS_CHK(inspectorLockInit(&commInfo->guard));
   commInfo->next = nullptr;
@@ -1223,7 +1228,8 @@ static inspectorResult_t inspectorFillCommInfo(struct inspectorCommInfo* commInf
  */
 inspectorResult_t inspectorAddComm(struct inspectorCommInfo **commInfo,
                                    const char* commName, uint64_t commHash,
-                                   int nNodes, int nranks, int rank) {
+                                   int nNodes, int nranks, int rank,
+                                   int localRank, int localRanks) {
   struct inspectorCommInfoList* liveCommInfoList = &g_state.liveComms;
   struct inspectorCommInfo* commInfoPtr = nullptr;
 
@@ -1254,7 +1260,9 @@ inspectorResult_t inspectorAddComm(struct inspectorCommInfo **commInfo,
                                      commHash,
                                      nNodes,
                                      nranks,
-                                     rank),
+                                     rank,
+                                     localRank,
+                                     localRanks),
                res, fail);
 
   INSPECTOR_LOCK_WR_FLAG(&liveCommInfoList->guard, locked,

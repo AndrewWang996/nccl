@@ -117,10 +117,12 @@ typedef struct {
   //  - nNodes         : number of nodes in communicator
   //  - nranks         : number of ranks in communicator
   //  - rank           : rank identifier in communicator
+  //  - localRank      : local rank identifier within node
+  //  - localRanks     : number of local ranks on this node
   //  - logfn          : logger function
   // Output
   //  - eActivationMask: bitmask of active events set by the plugin
-  ncclResult_t (*init)(void** context, uint64_t commId, int* eActivationMask, const char* commName, int nNodes, int nranks, int rank, ncclDebugLogger_t logfn);
+  ncclResult_t (*init)(void** context, uint64_t commId, int* eActivationMask, const char* commName, int nNodes, int nranks, int rank, int localRank, int localRanks, ncclDebugLogger_t logfn);
 
   // startEvent - initialize and start a new event for the supplied event descriptor inside the eventset
   // Input

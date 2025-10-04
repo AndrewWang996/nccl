@@ -98,7 +98,7 @@ static ncclResult_t ncclProfiler_recordEventState(void* eHandle, ncclProfilerEve
   return ncclProfiler_v4->recordEventState(eHandle, (ncclProfilerEventState_v4_t)eState, &eStateArgs_v4);
 }
 
-static ncclResult_t ncclProfiler_init(void** ctx, uint64_t commId, int* eActivationMask, const char* commName, int nNodes, int nRanks, int rank, ncclDebugLogger_t logfn) {
+static ncclResult_t ncclProfiler_init(void** ctx, uint64_t commId, int* eActivationMask, const char* commName, int nNodes, int nRanks, int rank, int localRank, int localRanks, ncclDebugLogger_t logfn) {
   NCCLCHECK(ncclProfiler_v4->init(ctx, eActivationMask, commName, commId, nNodes, nRanks, rank, logfn));
   ncclProfiler.startEvent = ncclProfiler_startEvent;
   ncclProfiler.recordEventState = ncclProfiler_recordEventState;
