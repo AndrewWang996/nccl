@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <cstring>
+#include <dirent.h>
 
 #include "common.h"
 
@@ -749,13 +750,19 @@ struct inspectorDumpThread {
   char* outputRoot;
   char* logFilename;  // Store the full log filename for re-opening
   uint64_t sampleIntervalUsecs;
-  uint64_t lastFileCheckTime;  // Track when we last checked if file exists
+  uint64_t currentFileStartTime;      // When current file was opened
+  uint64_t lastCleanupTime;           // Last time we checked for old files
+  uint64_t rotationIntervalUsecs;     // How often to rotate files (default 60s)
+  uint64_t maxFileAgeUsecs;           // Max age before deletion (default 300s)
+  uint64_t cleanupIntervalUsecs;      // How often to check for old files (default 30s)
   pthread_t pthread;
   pthread_rwlock_t guard;
 
   inspectorDumpThread(const char* outputRoot, uint64_t sampleIntervalUsecs)
     : jfo(nullptr), outputRoot(strdup(outputRoot)), logFilename(nullptr),
-      sampleIntervalUsecs(sampleIntervalUsecs), lastFileCheckTime(0) {
+      sampleIntervalUsecs(sampleIntervalUsecs), currentFileStartTime(0),
+      lastCleanupTime(0), rotationIntervalUsecs(60 * 1000000),
+      maxFileAgeUsecs(300 * 1000000), cleanupIntervalUsecs(30 * 1000000) {
     if (inspectorLockInit(&guard) != inspectorSuccess) {
       INFO(NCCL_INSPECTOR, "NCCL Inspector inspectorDumpThread: couldn't init lock");
     }
@@ -803,6 +810,66 @@ struct inspectorDumpThread {
     INFO(NCCL_INSPECTOR, "NCCL Inspector inspectorDumpThread: stopped");
   }
 
+  void cleanupOldFiles() {
+    DIR* dir = opendir(outputRoot);
+    if (dir == nullptr) {
+      INFO(NCCL_INSPECTOR, "Failed to open directory %s for cleanup: %s", outputRoot, strerror(errno));
+      return;
+    }
+
+    uint64_t currentTime = inspectorGetTime();
+    uint64_t cutoffTimeUsecs = currentTime - maxFileAgeUsecs;
+
+    char hostname[256];
+    gethostname(hostname, 255);
+    pid_t pid = getpid();
+
+    // Build expected prefix for our files
+    char expectedPrefix[512];
+    snprintf(expectedPrefix, sizeof(expectedPrefix), "%s-pid%d-", hostname, pid);
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      // Check if this is one of our log files
+      if (strstr(entry->d_name, expectedPrefix) != nullptr &&
+          strstr(entry->d_name, ".log") != nullptr) {
+
+        // Parse timestamp from filename (format: hostname-pidXXX-timestamp.log)
+        char* timestampStart = strrchr(entry->d_name, '-');
+        if (timestampStart != nullptr) {
+          timestampStart++; // Skip the '-'
+          char* endptr;
+          uint64_t fileTimestampSec = strtoull(timestampStart, &endptr, 10);
+
+          // Check if parsing succeeded and extension is .log
+          if (endptr != nullptr && strcmp(endptr, ".log") == 0 && fileTimestampSec > 0) {
+            uint64_t fileTimeUsecs = fileTimestampSec * 1000000;
+
+            // Check if file is older than max age
+            if (fileTimeUsecs < cutoffTimeUsecs) {
+              char fullPath[2048];
+              snprintf(fullPath, sizeof(fullPath), "%s/%s", outputRoot, entry->d_name);
+
+              // Don't delete the current file we're writing to
+              if (logFilename != nullptr && strcmp(fullPath, logFilename) == 0) {
+                continue;
+              }
+
+              if (unlink(fullPath) == 0) {
+                INFO(NCCL_INSPECTOR, "Deleted old log file %s (age: %lu seconds)",
+                     entry->d_name, (currentTime - fileTimeUsecs) / 1000000);
+              } else {
+                INFO(NCCL_INSPECTOR, "Failed to delete old log file %s: %s",
+                     fullPath, strerror(errno));
+              }
+            }
+          }
+        }
+      }
+    }
+    closedir(dir);
+  }
+
   inspectorResult_t inspectorStateDump(const char* output_root) {
     if (!ncclInspectorInit) {
       return inspectorUninitializedError;
@@ -812,43 +879,47 @@ struct inspectorDumpThread {
       return inspectorDisabledError;
     }
 
-    // Generate filename if not already done
-    if (logFilename == nullptr) {
-      char hostname[256];
-      gethostname(hostname, 255);
-      char tmp[2048];
-      snprintf(tmp, sizeof(tmp), "%s/%s-pid%d.log", output_root, hostname, getpid());
-      logFilename = strdup(tmp);
-    }
-
-    // Check if we need to verify file existence (every 500ms)
     uint64_t currentTime = inspectorGetTime();
-    bool needsFileCheck = (currentTime - lastFileCheckTime) > 500000; // 500ms in microseconds
 
-    if (needsFileCheck) {
-      lastFileCheckTime = currentTime;
-
-      // Check if file still exists
-      struct stat fileStat;
-      bool fileExists = (stat(logFilename, &fileStat) == 0);
-
-      if (jfo != nullptr && !fileExists) {
-        // File was deleted, close the old handle
-        INFO(NCCL_INSPECTOR, "Log file %s was removed, reopening", logFilename);
-        jsonFinalizeFileOutput(jfo);
-        jfo = nullptr;
+    // Check if we need to rotate files (every rotation interval, default 60s)
+    if (jfo != nullptr &&
+        (currentTime - currentFileStartTime) > rotationIntervalUsecs) {
+      INFO(NCCL_INSPECTOR, "Rotating log file after %lu seconds",
+           (currentTime - currentFileStartTime) / 1000000);
+      jsonFinalizeFileOutput(jfo);
+      jfo = nullptr;
+      if (logFilename != nullptr) {
+        free(logFilename);
+        logFilename = nullptr;
       }
     }
 
-    // Open file if needed
+    // Open new file if needed
     if (jfo == nullptr) {
+      char hostname[256];
+      gethostname(hostname, 255);
+
+      // Use current timestamp in seconds for filename
+      uint64_t timestampSec = currentTime / 1000000;
+      char tmp[2048];
+      snprintf(tmp, sizeof(tmp), "%s/%s-pid%d-%lu.log",
+               output_root, hostname, getpid(), timestampSec);
+      logFilename = strdup(tmp);
+
       jsonResult_t result = jsonInitFileOutput(&jfo, logFilename);
       if (jsonSuccess != result) {
         INFO(NCCL_INSPECTOR, "Cannot open %s for writing: %s", logFilename, jsonErrorString(result));
         return inspectorFileOpenError;
       }
       chmod(logFilename, 0666);
-      INFO(NCCL_INSPECTOR, "Opened log file %s", logFilename);
+      currentFileStartTime = currentTime;
+      INFO(NCCL_INSPECTOR, "Opened new log file %s", logFilename);
+    }
+
+    // Periodically cleanup old files (every cleanup interval, default 30s)
+    if ((currentTime - lastCleanupTime) > cleanupIntervalUsecs) {
+      cleanupOldFiles();
+      lastCleanupTime = currentTime;
     }
 
     if (jfo != nullptr) {
@@ -867,7 +938,7 @@ struct inspectorDumpThread {
     inspectorResult_t res = inspectorSuccess;
     struct timespec ts;
     ts.tv_sec = dumper->sampleIntervalUsecs / 1000000;
-    ts.tv_nsec = dumper->sampleIntervalUsecs % 1000000;
+    ts.tv_nsec = (dumper->sampleIntervalUsecs % 1000000) * 1000;  // Convert microseconds to nanoseconds
 
     while (dumper->run) {
       inspectorLockWr(&dumper->guard);
@@ -941,7 +1012,9 @@ static void showInspectorEnvVars() {
     {"NCCL_INSPECTOR_DUMP_THREAD_ENABLE", getenv("NCCL_INSPECTOR_DUMP_THREAD_ENABLE"), "1", "Enable/disable dump thread"},
     {"NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS", getenv("NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS"), "0", "Dump thread interval in microseconds"},
     {"NCCL_INSPECTOR_DUMP_DIR", getenv("NCCL_INSPECTOR_DUMP_DIR"), "(auto-generated)", "Output directory for inspector logs"},
-    {"NCCL_INSPECTOR_DUMP_VERBOSE", getenv("NCCL_INSPECTOR_DUMP_VERBOSE"), "0", "Enable/disable verbose dumping (event_trace)"}
+    {"NCCL_INSPECTOR_DUMP_VERBOSE", getenv("NCCL_INSPECTOR_DUMP_VERBOSE"), "0", "Enable/disable verbose dumping (event_trace)"},
+    {"NCCL_INSPECTOR_FILE_ROTATION_SECONDS", getenv("NCCL_INSPECTOR_FILE_ROTATION_SECONDS"), "60", "File rotation interval in seconds"},
+    {"NCCL_INSPECTOR_FILE_MAX_AGE_SECONDS", getenv("NCCL_INSPECTOR_FILE_MAX_AGE_SECONDS"), "300", "Max file age before deletion in seconds"}
   };
 
   const int numEnvVars = sizeof(envVars) / sizeof(envVars[0]);
@@ -1027,6 +1100,17 @@ inspectorResult_t inspectorGlobalInit(int rank) {
       }
 
       dumper = new inspectorDumpThread(dumpdir, interval);
+
+      // Set rotation interval from environment
+      str = getenv("NCCL_INSPECTOR_FILE_ROTATION_SECONDS");
+      uint64_t rotationSecs = str ? strtoull(str, 0, 0) : 60;  // Default 60 seconds
+      dumper->rotationIntervalUsecs = rotationSecs * 1000000;
+
+      // Set max file age from environment
+      str = getenv("NCCL_INSPECTOR_FILE_MAX_AGE_SECONDS");
+      uint64_t maxAgeSecs = str ? strtoull(str, 0, 0) : 300;  // Default 300 seconds (5 minutes)
+      dumper->maxFileAgeUsecs = maxAgeSecs * 1000000;
+
       dumper->startThread();
 
       INFO(NCCL_INSPECTOR,
