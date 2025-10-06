@@ -2,3 +2,5 @@
 /build
 *.gcov
 /coverage/
+ext-profiler/inspector/libnccl-profiler-inspector.so
+
