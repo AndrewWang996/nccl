@@ -646,6 +646,79 @@ static inspectorResult_t inspectorCommInfoListFinalize(struct inspectorCommInfoL
 /*
  * Description:
  *
+ *   Recursively ensures all parent directories exist, creating them
+ *   if necessary (similar to mkdir -p).
+ *
+ * Thread Safety:
+ *   Not thread-safe (uses static buffer).
+ *
+ * Input:
+ *   const char* path - directory path.
+ *
+ * Output:
+ *   All parent directories are created if needed.
+ *
+ * Return:
+ *   bool - true if directory exists or was created, false on error.
+ */
+static bool ensureDirRecursive(const char* path) {
+  char tmp[2048];
+  char* p = nullptr;
+  size_t len;
+  struct stat st;
+
+  snprintf(tmp, sizeof(tmp), "%s", path);
+  len = strlen(tmp);
+
+  // Remove trailing slash if present
+  if (tmp[len - 1] == '/') {
+    tmp[len - 1] = 0;
+  }
+
+  // Create directories from root to leaf
+  for (p = tmp + 1; *p; p++) {
+    if (*p == '/') {
+      *p = 0;  // Temporarily terminate string
+
+      // Check if this path component exists
+      if (stat(tmp, &st) != 0) {
+        // Doesn't exist, create it
+        if (mkdir(tmp, 0777) != 0 && errno != EEXIST) {
+          INFO(NCCL_INSPECTOR, "Failed to create directory %s: %s", tmp, strerror(errno));
+          return false;
+        }
+      } else if (!S_ISDIR(st.st_mode)) {
+        INFO(NCCL_INSPECTOR, "Path %s exists but is not a directory", tmp);
+        return false;
+      }
+
+      *p = '/';  // Restore the slash
+    }
+  }
+
+  // Create the final directory
+  if (stat(tmp, &st) != 0) {
+    if (mkdir(tmp, 0777) != 0 && errno != EEXIST) {
+      INFO(NCCL_INSPECTOR, "Failed to create directory %s: %s", tmp, strerror(errno));
+      return false;
+    }
+  } else if (!S_ISDIR(st.st_mode)) {
+    INFO(NCCL_INSPECTOR, "Path %s exists but is not a directory", tmp);
+    return false;
+  }
+
+  // Check if directory is writable
+  if (access(tmp, W_OK) != 0) {
+    INFO(NCCL_INSPECTOR, "Directory %s exists but is not writable", tmp);
+    return false;
+  }
+
+  return true;
+}
+
+/*
+ * Description:
+ *
  *   Ensures the given directory exists and is writable, creating it
  *   if necessary.
  *
@@ -817,8 +890,8 @@ struct inspectorDumpThread {
       return;
     }
 
-    uint64_t currentTime = inspectorGetTime();
-    uint64_t cutoffTimeUsecs = currentTime - maxFileAgeUsecs;
+    time_t currentTimeSec = time(nullptr);
+    time_t cutoffTimeSec = currentTimeSec - (maxFileAgeUsecs / 1000000);
 
     char hostname[256];
     gethostname(hostname, 255);
@@ -834,36 +907,30 @@ struct inspectorDumpThread {
       if (strstr(entry->d_name, expectedPrefix) != nullptr &&
           strstr(entry->d_name, ".log") != nullptr) {
 
-        // Parse timestamp from filename (format: hostname-pidXXX-timestamp.log)
-        char* timestampStart = strrchr(entry->d_name, '-');
-        if (timestampStart != nullptr) {
-          timestampStart++; // Skip the '-'
-          char* endptr;
-          uint64_t fileTimestampSec = strtoull(timestampStart, &endptr, 10);
+        char fullPath[2048];
+        snprintf(fullPath, sizeof(fullPath), "%s/%s", outputRoot, entry->d_name);
 
-          // Check if parsing succeeded and extension is .log
-          if (endptr != nullptr && strcmp(endptr, ".log") == 0 && fileTimestampSec > 0) {
-            uint64_t fileTimeUsecs = fileTimestampSec * 1000000;
+        // Don't delete the current file we're writing to
+        if (logFilename != nullptr && strcmp(fullPath, logFilename) == 0) {
+          continue;
+        }
 
-            // Check if file is older than max age
-            if (fileTimeUsecs < cutoffTimeUsecs) {
-              char fullPath[2048];
-              snprintf(fullPath, sizeof(fullPath), "%s/%s", outputRoot, entry->d_name);
-
-              // Don't delete the current file we're writing to
-              if (logFilename != nullptr && strcmp(fullPath, logFilename) == 0) {
-                continue;
-              }
-
-              if (unlink(fullPath) == 0) {
-                INFO(NCCL_INSPECTOR, "Deleted old log file %s (age: %lu seconds)",
-                     entry->d_name, (currentTime - fileTimeUsecs) / 1000000);
-              } else {
-                INFO(NCCL_INSPECTOR, "Failed to delete old log file %s: %s",
-                     fullPath, strerror(errno));
-              }
+        // Get file modification time from filesystem
+        struct stat fileStat;
+        if (stat(fullPath, &fileStat) == 0) {
+          // Check if file modification time is older than cutoff
+          if (fileStat.st_mtime < cutoffTimeSec) {
+            if (unlink(fullPath) == 0) {
+              INFO(NCCL_INSPECTOR, "Deleted old log file %s (age: %ld seconds based on mtime)",
+                   entry->d_name, currentTimeSec - fileStat.st_mtime);
+            } else {
+              INFO(NCCL_INSPECTOR, "Failed to delete old log file %s: %s",
+                   fullPath, strerror(errno));
             }
           }
+        } else {
+          // Could not stat file, skip it
+          INFO(NCCL_INSPECTOR, "Could not stat file %s: %s", fullPath, strerror(errno));
         }
       }
     }
@@ -896,6 +963,12 @@ struct inspectorDumpThread {
 
     // Open new file if needed
     if (jfo == nullptr) {
+      // Ensure directory exists (it might have been deleted)
+      if (!ensureDirRecursive(output_root)) {
+        INFO(NCCL_INSPECTOR, "Failed to ensure directory %s exists", output_root);
+        return inspectorFileOpenError;
+      }
+
       char hostname[256];
       gethostname(hostname, 255);
 
@@ -1092,7 +1165,7 @@ inspectorResult_t inspectorGlobalInit(int rank) {
     genDumpDir(&dumpdir);
 
     if (dumpdir != nullptr) {
-      if (!ensureDir(dumpdir)) {
+      if (!ensureDirRecursive(dumpdir)) {
         free(dumpdir);
         INFO(NCCL_INSPECTOR, "NCCL Inspector: failed to generate a dump dir; not "
              "starting internal dump thread.");
