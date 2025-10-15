@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 const char* jsonErrorString(jsonResult_t res) {
   switch (res) {
@@ -26,6 +28,8 @@ const char* jsonErrorString(jsonResult_t res) {
     return "jsonStringBadChar";
   case jsonLockError:
     return "jsonLockError";
+  case jsonFileDeletedError:
+    return "jsonFileDeletedError";
   default:
     return "unknown json error";
   }
@@ -69,7 +73,34 @@ jsonResult_t jsonNewline(jsonFileOutput* jfo) {
 }
 
 jsonResult_t jsonFlushOutput(jsonFileOutput* jfo) {
+  // Check if file still exists before flushing
+  if (jsonCheckFileExists(jfo) == jsonFileDeletedError) {
+    return jsonFileDeletedError;
+  }
   fflush(jfo->fp);
+  return jsonSuccess;
+}
+
+jsonResult_t jsonCheckFileExists(jsonFileOutput* jfo) {
+  if (jfo == NULL || jfo->fp == NULL) {
+    return jsonFileError;
+  }
+
+  struct stat file_stat;
+  int fd = fileno(jfo->fp);
+
+  // Check if we can still stat the file descriptor
+  if (fstat(fd, &file_stat) != 0) {
+    // File descriptor is no longer valid
+    return jsonFileDeletedError;
+  }
+
+  // Check if the file still has a link (nlink > 0 means file exists)
+  if (file_stat.st_nlink == 0) {
+    // File has been unlinked/deleted
+    return jsonFileDeletedError;
+  }
+
   return jsonSuccess;
 }
 

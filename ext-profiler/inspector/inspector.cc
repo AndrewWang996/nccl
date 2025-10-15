@@ -601,7 +601,15 @@ static inspectorResult_t inspectorCommInfoListDump(jsonFileOutput* jfo,
     }
     if (flush) {
       JSON_CHK_GOTO(jsonLockOutput(jfo), res, finalize);
-      JSON_CHK_GOTO(jsonFlushOutput(jfo), res, finalize);
+      jsonResult_t flushRes = jsonFlushOutput(jfo);
+      if (flushRes == jsonFileDeletedError) {
+        res = inspectorJsonError;
+        goto finalize;
+      } else if (flushRes != jsonSuccess) {
+        INFO(NCCL_INSPECTOR, "jsonError: %s\n", jsonErrorString(flushRes));
+        res = inspectorJsonError;
+        goto finalize;
+      }
       JSON_CHK_GOTO(jsonUnlockOutput(jfo), res, finalize);
     }
   }
@@ -996,8 +1004,48 @@ struct inspectorDumpThread {
     }
 
     if (jfo != nullptr) {
-      inspectorCommInfoListDump(jfo, &g_state.liveComms);
-      inspectorCommInfoListDump(jfo, &g_state.deletedComms);
+      inspectorResult_t dumpRes = inspectorCommInfoListDump(jfo, &g_state.liveComms);
+
+      // Check if file was deleted during or before write
+      if (dumpRes != inspectorSuccess || jsonCheckFileExists(jfo) == jsonFileDeletedError) {
+        INFO(NCCL_INSPECTOR, "Log file was deleted, creating new file with fresh timestamp");
+        jsonFinalizeFileOutput(jfo);
+        jfo = nullptr;
+        if (logFilename != nullptr) {
+          free(logFilename);
+          logFilename = nullptr;
+        }
+
+        // Create a new file with current timestamp
+        if (!ensureDirRecursive(output_root)) {
+          INFO(NCCL_INSPECTOR, "Failed to ensure directory %s exists", output_root);
+          return inspectorFileOpenError;
+        }
+
+        char hostname[256];
+        gethostname(hostname, 255);
+        uint64_t timestampSec = currentTime / 1000000;
+        char tmp[2048];
+        snprintf(tmp, sizeof(tmp), "%s/%s-pid%d-%lu.log",
+                 output_root, hostname, getpid(), timestampSec);
+        logFilename = strdup(tmp);
+
+        jsonResult_t result = jsonInitFileOutput(&jfo, logFilename);
+        if (jsonSuccess != result) {
+          INFO(NCCL_INSPECTOR, "Cannot open %s for writing: %s", logFilename, jsonErrorString(result));
+          return inspectorFileOpenError;
+        }
+        chmod(logFilename, 0666);
+        currentFileStartTime = currentTime;
+        INFO(NCCL_INSPECTOR, "Opened new log file %s after deletion", logFilename);
+
+        // Retry the dump with the new file
+        inspectorCommInfoListDump(jfo, &g_state.liveComms);
+        inspectorCommInfoListDump(jfo, &g_state.deletedComms);
+      } else {
+        // File is still valid, continue with second dump
+        inspectorCommInfoListDump(jfo, &g_state.deletedComms);
+      }
     }
 
     if (g_state.deletedComms.ncomms > 0) {

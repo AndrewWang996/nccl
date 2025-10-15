@@ -23,6 +23,7 @@ typedef enum {
   jsonStringBadChar,
   jsonMemoryError,
   jsonLockError,
+  jsonFileDeletedError,
 } jsonResult_t;
 
 const char *jsonErrorString(jsonResult_t res);
@@ -40,6 +41,7 @@ jsonResult_t jsonFinalizeFileOutput(jsonFileOutput *jfo);
 
 jsonResult_t jsonNewline(jsonFileOutput *jfo);
 jsonResult_t jsonFlushOutput(jsonFileOutput *jfo);
+jsonResult_t jsonCheckFileExists(jsonFileOutput *jfo);
 
 // Emit a key and separator. Santize the key.
 // This is only acceptable if the top state is an object
